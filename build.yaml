@@ -1,0 +1,14 @@
+---
+name: "SubSync"
+guid: "c7d8e9f0-a1b2-4c3d-e5f6-a7b8c9d0e1f2"
+version: "1.0.0"
+targetAbi: "10.11.6"
+framework: "net9.0"
+owner: "jellysubsync"
+description: "Synchronize subtitles with video audio using ffsubsync"
+category: "General"
+overview: "Adds a 'Sync Subtitles' action to any video, letting you sync an existing subtitle track to the video's audio using ffsubsync as backend"
+artifacts:
+  - "Jellyfin.Plugin.SubSync.dll"
+changelog: |-
+  Initial release

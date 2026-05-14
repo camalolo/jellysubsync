@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>SubSync Configuration</title>
+</head>
+<body>
+    <div id="SubSyncConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="SubSyncConfigForm">
+                    <div class="verticalSection">
+                        <div class="sectionTitleContainer flex align-items-center">
+                            <h2 class="sectionTitle">SubSync</h2>
+                        </div>
+                        <p class="sectionDescription">Synchronize subtitles with video audio using ffsubsync.</p>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h3>ffsubsync Installation</h3>
+                        <div id="SubSyncInstallStatus" style="padding:12px;border-radius:6px;margin-bottom:12px;background:#333;">
+                            Checking installation status...
+                        </div>
+                        <button type="button" id="SubSyncInstallBtn" is="emby-button" class="raised block emby-button" style="margin-bottom:4px;">
+                            <span>Install / Update ffsubsync</span>
+                        </button>
+                        <div class="fieldDescription">
+                            Installs ffsubsync into an isolated Python virtualenv managed by this plugin.
+                            Only requires <code>python3</code> on the system — no root or system-wide pip install needed.
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h3>Paths (Advanced)</h3>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="FfSubSyncPath">ffsubsync executable path</label>
+                            <input is="emby-input" type="text" id="FfSubSyncPath" name="FfSubSyncPath" placeholder="ffsubsync" />
+                            <div class="fieldDescription">
+                                Override the ffsubsync binary path. Leave as "ffsubsync" to use the managed install (recommended)
+                                or the system PATH.
+                            </div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="FfmpegPath">ffmpeg path (optional)</label>
+                            <input is="emby-input" type="text" id="FfmpegPath" name="FfmpegPath" placeholder="" />
+                            <div class="fieldDescription">Override ffmpeg path. Leave empty to use system PATH.</div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h3>Synchronization Settings</h3>
+                        <div class="selectContainer">
+                            <label class="selectLabel" for="VadMethod">Voice Activity Detector</label>
+                            <select is="emby-select" id="VadMethod" name="VadMethod">
+                                <option value="subs_then_webrtc">subs_then_webrtc (default)</option>
+                                <option value="webrtc">webrtc</option>
+                                <option value="subs_then_auditok">subs_then_auditok</option>
+                                <option value="auditok">auditok</option>
+                                <option value="subs_then_silero">subs_then_silero</option>
+                                <option value="silero">silero</option>
+                            </select>
+                            <div class="fieldDescription">The VAD method used by ffsubsync for speech detection.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="MaxOffsetSeconds">Max offset seconds</label>
+                            <input is="emby-input" type="number" id="MaxOffsetSeconds" name="MaxOffsetSeconds" min="1" max="600" />
+                            <div class="fieldDescription">Maximum allowed offset in seconds for any subtitle segment. Default: 60.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="MaxSubtitleSeconds">Max subtitle seconds</label>
+                            <input is="emby-input" type="number" id="MaxSubtitleSeconds" name="MaxSubtitleSeconds" min="1" max="60" step="0.5" />
+                            <div class="fieldDescription">Maximum on-screen duration for a subtitle. Default: 10.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="OutputEncoding">Output encoding</label>
+                            <input is="emby-input" type="text" id="OutputEncoding" name="OutputEncoding" placeholder="utf-8" />
+                            <div class="fieldDescription">Encoding for the synced subtitle file. Default: utf-8.</div>
+                        </div>
+                        <div class="checkboxContainer">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="UseGoldenSectionSearch" name="UseGoldenSectionSearch" />
+                                <span>Use golden-section search for framerate ratio</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">Enable --gss to find optimal framerate ratio between video and subtitles.</div>
+                        </div>
+                        <div class="checkboxContainer">
+                            <label class="emby-checkbox-label">
+                                <input is="emby-checkbox" type="checkbox" id="OverwriteExisting" name="OverwriteExisting" />
+                                <span>Overwrite existing synced subtitles</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">If a synced version already exists, overwrite it when re-syncing.</div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h3>Client Integration</h3>
+                        <p>To add the "Sync Subtitles" button to video detail pages, add the following to
+                        <strong>Dashboard → General → Custom client JavaScript</strong>:</p>
+                        <pre style="background:#222;color:#eee;padding:12px;border-radius:4px;overflow-x:auto;font-size:13px;">
+&lt;script src="/SubSync/ClientScript"&gt;&lt;/script&gt;</pre>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <script type="text/javascript">
+            var PluginId = "c7d8e9f0-a1b2-4c3d-e5f6-a7b8c9d0e1f2";
+
+            function apiFetch(url, options) {
+                options = options || {};
+                options.headers = options.headers || {};
+                options.headers['X-Emby-Token'] = ApiClient.accessToken();
+                return fetch(url, options).then(function (r) {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                });
+            }
+
+            function updateInstallStatus() {
+                var el = document.querySelector('#SubSyncInstallStatus');
+                el.textContent = 'Checking installation status...';
+                el.style.background = '#333';
+                el.style.color = '#eee';
+
+                apiFetch('/SubSync/InstallationStatus').then(function (status) {
+                    var lines = [];
+                    var color = '#eee';
+                    var bg = '#333';
+
+                    if (status.PythonAvailable) {
+                        lines.push('✓ Python: ' + status.PythonVersion);
+                    } else {
+                        lines.push('✗ Python3 not found on this system');
+                        color = '#f88';
+                        bg = '#422';
+                    }
+
+                    if (status.IsInstalled) {
+                        lines.push('✓ ffsubsync: ' + (status.FfSubSyncVersion || 'installed'));
+                        lines.push('  Path: ' + status.ManagedBinaryPath);
+                        if (!status.PythonAvailable) { color = '#ff8'; bg = '#442'; }
+                        else { color = '#8f8'; bg = '#234'; }
+                    } else {
+                        lines.push('✗ ffsubsync: not installed (managed)');
+                        if (status.PythonAvailable) { color = '#ff8'; bg = '#442'; }
+                    }
+
+                    lines.push('');
+                    lines.push('Will use: ' + (status.ResolvedBinaryPath || 'ffsubsync'));
+
+                    el.textContent = lines.join('\n');
+                    el.style.background = bg;
+                    el.style.color = color;
+                    el.style.whiteSpace = 'pre';
+                    el.style.fontFamily = 'monospace';
+                    el.style.fontSize = '13px';
+                }).catch(function (err) {
+                    el.textContent = 'Error checking status: ' + err.message;
+                    el.style.background = '#422';
+                });
+            }
+
+            document.querySelector('#SubSyncConfigPage')
+                .addEventListener('pageshow', function () {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(PluginId).then(function (config) {
+                        document.querySelector('#FfSubSyncPath').value = config.FfSubSyncPath || 'ffsubsync';
+                        document.querySelector('#FfmpegPath').value = config.FfmpegPath || '';
+                        document.querySelector('#VadMethod').value = config.VadMethod || 'subs_then_webrtc';
+                        document.querySelector('#MaxOffsetSeconds').value = config.MaxOffsetSeconds || 60;
+                        document.querySelector('#MaxSubtitleSeconds').value = config.MaxSubtitleSeconds || 10;
+                        document.querySelector('#OutputEncoding').value = config.OutputEncoding || 'utf-8';
+                        document.querySelector('#UseGoldenSectionSearch').checked = config.UseGoldenSectionSearch || false;
+                        document.querySelector('#OverwriteExisting').checked = config.OverwriteExisting !== false;
+                        Dashboard.hideLoadingMsg();
+                    });
+                    updateInstallStatus();
+                });
+
+            document.querySelector('#SubSyncInstallBtn')
+                .addEventListener('click', function () {
+                    var btn = this;
+                    if (btn.disabled) return;
+                    btn.disabled = true;
+                    btn.querySelector('span').textContent = 'Installing...';
+
+                    var el = document.querySelector('#SubSyncInstallStatus');
+                    el.textContent = 'Installing ffsubsync — this may take a minute...';
+                    el.style.background = '#335';
+                    el.style.color = '#88f';
+
+                    apiFetch('/SubSync/Install', { method: 'POST' })
+                        .then(function (result) {
+                            btn.querySelector('span').textContent = 'Install / Update ffsubsync';
+                            btn.disabled = false;
+                            updateInstallStatus();
+                            Dashboard.alert('ffsubsync installed successfully!');
+                        })
+                        .catch(function (err) {
+                            btn.querySelector('span').textContent = 'Install / Update ffsubsync';
+                            btn.disabled = false;
+                            el.textContent = 'Installation failed: ' + err.message;
+                            el.style.background = '#422';
+                            el.style.color = '#f88';
+                        });
+                });
+
+            document.querySelector('#SubSyncConfigForm')
+                .addEventListener('submit', function (e) {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(PluginId).then(function (config) {
+                        config.FfSubSyncPath = document.querySelector('#FfSubSyncPath').value || 'ffsubsync';
+                        config.FfmpegPath = document.querySelector('#FfmpegPath').value;
+                        config.VadMethod = document.querySelector('#VadMethod').value;
+                        config.MaxOffsetSeconds = parseInt(document.querySelector('#MaxOffsetSeconds').value) || 60;
+                        config.MaxSubtitleSeconds = parseFloat(document.querySelector('#MaxSubtitleSeconds').value) || 10;
+                        config.OutputEncoding = document.querySelector('#OutputEncoding').value || 'utf-8';
+                        config.UseGoldenSectionSearch = document.querySelector('#UseGoldenSectionSearch').checked;
+                        config.OverwriteExisting = document.querySelector('#OverwriteExisting').checked;
+                        ApiClient.updatePluginConfiguration(PluginId, config).then(function () {
+                            Dashboard.processPluginConfigurationUpdateResult();
+                        });
+                    });
+                    e.preventDefault();
+                    return false;
+                });
+        </script>
+    </div>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "category": "General",
+  "changelog": "Initial release",
+  "description": "Synchronize subtitles with video audio using ffsubsync",
+  "guid": "c7d8e9f0-a1b2-4c3d-e5f6-a7b8c9d0e1f2",
+  "name": "SubSync",
+  "overview": "Adds a Sync Subtitles action to any video, using ffsubsync as backend",
+  "owner": "jellysubsync",
+  "targetAbi": "10.11.0.0",
+  "timestamp": "2026-05-14T21:30:00.0000000Z",
+  "version": "1.0.0.0",
+  "status": "Active",
+  "autoUpdate": false,
+  "imagePath": "",
+  "assemblies": [
+    "Jellyfin.Plugin.SubSync.dll"
+  ]
+}
