@@ -2,7 +2,7 @@
 name: "SubSync"
 guid: "c7d8e9f0-a1b2-4c3d-e5f6-a7b8c9d0e1f2"
 version: "1.0.0"
-targetAbi: "10.11.6"
+targetAbi: "10.11.0.0"
 framework: "net9.0"
 owner: "jellysubsync"
 description: "Synchronize subtitles with video audio using ffsubsync"

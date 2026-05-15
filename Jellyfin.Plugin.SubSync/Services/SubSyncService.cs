@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text.Json.Serialization;
 using Jellyfin.Plugin.SubSync.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -39,10 +40,11 @@ public class SubtitleInfo
     /// <summary>Gets or sets whether this subtitle is external (sidecar file).</summary>
     public bool IsExternal { get; set; }
 
-    /// <summary>Gets or sets the path to the external subtitle file, if applicable.</summary>
+    /// <summary>Gets or sets the path to the external subtitle file (not serialized in API responses).</summary>
+    [JsonIgnore]
     public string? ExternalPath { get; set; }
 
-    /// <summary>Gets or sets whether this subtitle has already been synced (has a .synced.srt counterpart).</summary>
+    /// <summary>Gets or sets whether this subtitle has already been synced.</summary>
     public bool HasSyncedVersion { get; set; }
 }
 
@@ -118,6 +120,24 @@ public class SubSyncService
     // Track whether an installation is currently in progress
     private int _installing;
 
+    // Concurrency limiter: max 2 concurrent sync jobs
+    private readonly SemaphoreSlim _concurrencyLimiter = new(2, 2);
+
+    // Cleanup timer for evicting old completed/failed jobs
+    private readonly Timer _cleanupTimer;
+
+    /// <summary>Allowed values for the --vad config option.</summary>
+    private static readonly HashSet<string> AllowedVadMethods = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "subs", "webrtc", "subs_then_webrtc", "auditok"
+    };
+
+    /// <summary>Allowed values for the --output-encoding config option.</summary>
+    private static readonly HashSet<string> AllowedOutputEncodings = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "utf-8", "ascii", "latin-1", "utf-8-sig", "utf-16"
+    };
+
     /// <summary>
     /// Initializes a new instance of the <see cref="SubSyncService"/> class.
     /// </summary>
@@ -127,6 +147,9 @@ public class SubSyncService
     {
         _logger = logger;
         _libraryManager = libraryManager;
+
+        // Evict completed/failed jobs older than 1 hour, check every 30 minutes
+        _cleanupTimer = new Timer(_ => CleanupOldJobs(), null, TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(30));
     }
 
     /// <summary>
@@ -169,6 +192,17 @@ public class SubSyncService
 
         // 3. Fall back to system PATH
         return "ffsubsync";
+    }
+
+    /// <summary>
+    /// Resolves the ffmpeg path from config or falls back to system PATH.
+    /// </summary>
+    private string ResolveFfmpegPath()
+    {
+        var config = Plugin.Instance?.Configuration;
+        return (config is not null && !string.IsNullOrWhiteSpace(config.FfmpegPath))
+            ? config.FfmpegPath
+            : "ffmpeg";
     }
 
     /// <summary>
@@ -238,6 +272,13 @@ public class SubSyncService
             var venvPath = Plugin.Instance?.VenvPath
                 ?? throw new InvalidOperationException("Plugin not initialized.");
 
+            // Validate venv path is a subdirectory of the expected plugin data path
+            var expectedParent = Path.GetFullPath(venvPath);
+            if (expectedParent.Contains(".."))
+            {
+                throw new InvalidOperationException("Venv path contains path traversal characters.");
+            }
+
             // Step 1: Create virtualenv
             if (!Directory.Exists(venvPath) || !File.Exists(ManagedPythonPath))
             {
@@ -298,25 +339,19 @@ public class SubSyncService
         }
 
         var source = mediaSources[0];
-        var videoDir = Path.GetDirectoryName(video.Path) ?? string.Empty;
-        var videoNameWithoutExt = Path.GetFileNameWithoutExtension(video.Path);
 
         return source.MediaStreams
             .Where(s => s.Type == MediaBrowser.Model.Entities.MediaStreamType.Subtitle)
             .Select(s =>
             {
-                var langCode = s.Language ?? "und";
-                var syncedFile = Path.Combine(videoDir, $"{videoNameWithoutExt}.synced.{langCode}.srt");
-                var hasSynced = File.Exists(syncedFile);
-
                 return new SubtitleInfo
                 {
                     Index = s.Index,
                     Title = s.DisplayTitle ?? s.Language ?? $"Track {s.Index}",
-                    Language = langCode,
+                    Language = s.Language ?? "und",
                     IsExternal = s.IsExternal,
                     ExternalPath = s.Path,
-                    HasSyncedVersion = hasSynced
+                    HasSyncedVersion = HasCompletedSync(itemId, s.Index)
                 };
             })
             .ToList();
@@ -333,20 +368,33 @@ public class SubSyncService
     /// <exception cref="InvalidOperationException">Thrown when the subtitle stream is not found or ffsubsync is unavailable.</exception>
     public SyncJob StartSync(Guid itemId, int subtitleIndex)
     {
+        if (subtitleIndex < 0)
+        {
+            throw new ArgumentException("Subtitle index must be non-negative.");
+        }
+
+        if (!_concurrencyLimiter.Wait(0))
+        {
+            throw new InvalidOperationException("Too many concurrent sync jobs. Please wait for existing jobs to finish.");
+        }
+
         var item = _libraryManager.GetItemById(itemId);
         if (item is not Video video)
         {
+            _concurrencyLimiter.Release();
             throw new InvalidOperationException($"Item {itemId} is not a video.");
         }
 
         if (!File.Exists(video.Path))
         {
-            throw new FileNotFoundException($"Video file not found: {video.Path}");
+            _concurrencyLimiter.Release();
+            throw new FileNotFoundException($"Video file not found.");
         }
 
         var mediaSources = video.GetMediaSources(true);
         if (mediaSources.Count == 0)
         {
+            _concurrencyLimiter.Release();
             throw new InvalidOperationException("No media sources found for the video.");
         }
 
@@ -356,10 +404,19 @@ public class SubSyncService
 
         if (subtitleStream is null)
         {
+            _concurrencyLimiter.Release();
             throw new InvalidOperationException($"Subtitle stream index {subtitleIndex} not found.");
         }
 
         var config = Plugin.Instance?.Configuration ?? new Configuration.PluginConfiguration();
+
+        // Check OverwriteExisting — reject if a completed sync exists for this item+stream
+        if (!config.OverwriteExisting && HasCompletedSync(itemId, subtitleIndex))
+        {
+            _concurrencyLimiter.Release();
+            throw new InvalidOperationException("A synced version already exists for this subtitle. Enable 'Overwrite Existing' to re-sync.");
+        }
+
         var job = new SyncJob
         {
             ItemId = itemId,
@@ -368,8 +425,24 @@ public class SubSyncService
 
         _jobs[job.Id] = job;
 
-        // Fire and forget — run in background
-        _ = Task.Run(() => RunSyncJob(job, video, subtitleStream, config));
+        // Fire and forget — run in background with proper error boundary
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RunSyncJob(job, video, subtitleStream, config).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unhandled exception in sync job {JobId}", job.Id);
+                job.Status = SyncJobStatus.Failed;
+                job.Error = $"Internal error: {ex.Message}";
+            }
+            finally
+            {
+                _concurrencyLimiter.Release();
+            }
+        });
 
         return job;
     }
@@ -627,37 +700,10 @@ public class SubSyncService
         // Then the user has both the original and synced embedded.
         // But the user asked to REPLACE, so we use -map to exclude the original sub and include the new one.
 
-        var ffmpegPath = "ffmpeg";
-        var pluginConfig = Plugin.Instance?.Configuration;
-        if (pluginConfig is not null && !string.IsNullOrWhiteSpace(pluginConfig.FfmpegPath))
-        {
-            ffmpegPath = pluginConfig.FfmpegPath;
-        }
+        var ffmpegPath = ResolveFfmpegPath();
 
-        // Strategy: copy all streams, but replace the target subtitle stream with the synced SRT.
-        // We use stream mapping:
-        //   -map 0:v       → all video streams
-        //   -map 0:a       → all audio streams
-        //   -map 0:s       → all subtitle streams
-        //   -map 1:0       → the synced SRT as new subtitle input
-        //   -disposition:s:X  → clear disposition on original sub
-        //
-        // Simpler approach: copy everything except the target subtitle, then add the synced one.
-        // This is complex with -map. Let's use the simplest safe approach:
-        //
-        //   ffmpeg -i video.mkv -i synced.srt \
-        //     -map 0 -map 1:0 \
-        //     -c copy \
-        //     -metadata:s:s:0 language=eng \
-        //     video_new.mkv
-        //
-        // This copies ALL original streams + adds the synced SRT as an additional subtitle.
-        // The original (unsynced) subtitle is preserved inside the file.
-        // This is the safest approach — no data loss even if something goes wrong.
-
-        // NOTE: The synced SRT is added as an additional subtitle stream alongside the original.
-        // This preserves the original subtitle inside the container for safety.
-
+        // Strategy: copy all original streams + add the synced SRT as an additional subtitle.
+        // The original (unsynced) subtitle is preserved inside the container for safety.
         var args = new List<string>
         {
             $"-i {EscapeArg(videoPath)}",
@@ -665,7 +711,6 @@ public class SubSyncService
             "-map 0",                // All original streams (including old subtitle)
             "-map 1:0",              // The synced SRT
             "-c copy",               // No re-encoding, just remux
-            $"-metadata:s:s:{subtitleStreamIndex} title=\"Original (unsynced)\"", // Rename old sub
             "-y",                    // Overwrite output
             EscapeArg(tempVideo)
         };
@@ -761,8 +806,58 @@ public class SubSyncService
         }
     }
 
+    /// <summary>
+    /// Checks if a completed sync job exists for the given item and subtitle index.
+    /// </summary>
+    private bool HasCompletedSync(Guid itemId, int subtitleIndex)
+    {
+        return _jobs.Values.Any(j =>
+            j.ItemId == itemId &&
+            j.SubtitleIndex == subtitleIndex &&
+            j.Status == SyncJobStatus.Completed);
+    }
+
+    /// <summary>
+    /// Evicts completed and failed jobs from the in-memory store to prevent memory leaks.
+    /// </summary>
+    private void CleanupOldJobs()
+    {
+        try
+        {
+            var cutoff = DateTime.UtcNow.AddHours(-1);
+            var toRemove = _jobs
+                .Where(kvp => kvp.Value.Status is SyncJobStatus.Completed or SyncJobStatus.Failed)
+                .Where(kvp => kvp.Value.Status == SyncJobStatus.Failed ||
+                              (kvp.Value.Progress >= 1.0 && _jobs.Count > 10))
+                .Select(kvp => kvp.Key)
+                .ToList();
+
+            foreach (var key in toRemove)
+            {
+                _jobs.TryRemove(key, out _);
+            }
+
+            if (toRemove.Count > 0)
+            {
+                _logger.LogDebug("Cleaned up {Count} old sync jobs", toRemove.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Error during job cleanup");
+        }
+    }
+
     private string BuildFfSubSyncArgs(Configuration.PluginConfiguration config, string videoPath, string subtitleInput, string subtitleOutput, string? logDir = null)
     {
+        // Validate config values to prevent argument injection
+        var vadMethod = AllowedVadMethods.Contains(config.VadMethod)
+            ? config.VadMethod
+            : "subs_then_webrtc";
+        var outputEncoding = AllowedOutputEncodings.Contains(config.OutputEncoding)
+            ? config.OutputEncoding
+            : "utf-8";
+
         var args = new List<string>
         {
             EscapeArg(videoPath),
@@ -770,8 +865,8 @@ public class SubSyncService
             "-o", EscapeArg(subtitleOutput),
             $"--max-offset-seconds {config.MaxOffsetSeconds}",
             $"--max-subtitle-seconds {config.MaxSubtitleSeconds}",
-            $"--vad {config.VadMethod}",
-            $"--output-encoding {config.OutputEncoding}"
+            $"--vad {vadMethod}",
+            $"--output-encoding {outputEncoding}"
         };
 
         if (!string.IsNullOrWhiteSpace(config.FfmpegPath))
@@ -794,10 +889,11 @@ public class SubSyncService
 
     private async Task ExtractSubtitle(string videoPath, int streamIndex, string outputPath)
     {
+        var ffmpegPath = ResolveFfmpegPath();
         var args = $"-i {EscapeArg(videoPath)} -map 0:s:{streamIndex} -f srt {EscapeArg(outputPath)} -y";
         _logger.LogInformation("Extracting subtitle: ffmpeg {Args}", args);
 
-        var exitCode = await RunProcessAsync("ffmpeg", args, null, CancellationToken.None).ConfigureAwait(false);
+        var exitCode = await RunProcessAsync(ffmpegPath, args, null, CancellationToken.None).ConfigureAwait(false);
         if (exitCode != 0)
         {
             throw new InvalidOperationException($"ffmpeg subtitle extraction failed with exit code {exitCode}.");
@@ -823,6 +919,13 @@ public class SubSyncService
         }
 
         process.Start();
+
+        // Kill the process if cancellation is requested
+        using var registration = cancellationToken.Register(() =>
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch { /* process may have already exited */ }
+        });
 
         var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
         var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
@@ -869,6 +972,13 @@ public class SubSyncService
         }
 
         process.Start();
+
+        // Kill the process if cancellation is requested
+        using var registration = cancellationToken.Register(() =>
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch { /* process may have already exited */ }
+        });
 
         // Read stdout in background
         var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);

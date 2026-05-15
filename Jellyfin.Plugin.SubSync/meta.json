@@ -7,7 +7,7 @@
   "overview": "Adds a Sync Subtitles action to any video, using ffsubsync as backend",
   "owner": "jellysubsync",
   "targetAbi": "10.11.0.0",
-  "timestamp": "2026-05-14T21:30:00.0000000Z",
+  "timestamp": "2026-05-15T12:00:00.0000000Z",
   "version": "1.0.0.0",
   "status": "Active",
   "autoUpdate": false,

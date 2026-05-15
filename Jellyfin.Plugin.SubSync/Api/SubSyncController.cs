@@ -1,4 +1,6 @@
+using System.ComponentModel.DataAnnotations;
 using Jellyfin.Plugin.SubSync.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -6,8 +8,10 @@ namespace Jellyfin.Plugin.SubSync.Api;
 
 /// <summary>
 /// API controller for the SubSync plugin.
+/// All endpoints require authentication via Jellyfin's middleware.
 /// </summary>
 [ApiController]
+[Authorize]
 [Route("SubSync")]
 public class SubSyncController : ControllerBase
 {
@@ -174,5 +178,6 @@ public class SyncRequest
     public Guid ItemId { get; set; }
 
     /// <summary>Gets or sets the subtitle stream index.</summary>
+    [Range(0, 999, ErrorMessage = "Subtitle index must be non-negative")]
     public int SubtitleIndex { get; set; }
 }
