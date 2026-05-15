@@ -60,13 +60,19 @@
                     clearInterval(pollInterval);
                     onError(job.Error || 'Sync failed');
                 } else {
-                    onProgress(job.Progress || 0);
+                    onProgress(job.Progress || 0, job.Phase || null);
                 }
             }).catch(function (err) {
                 clearInterval(pollInterval);
                 onError(err.message);
             });
         }, 2000);
+    }
+
+    function formatTime(totalSeconds) {
+        var m = Math.floor(totalSeconds / 60);
+        var s = totalSeconds % 60;
+        return m + ':' + (s < 10 ? '0' : '') + s;
     }
 
     function showSyncDialog(itemId) {
@@ -123,13 +129,38 @@
                     btn.disabled = true;
                     btn.textContent = 'Starting...';
 
+                    var startTime = Date.now();
+
                     startSync(itemId, sub.Index).then(function (job) {
                         btn.textContent = 'Syncing...';
                         row.style.background = '#335';
 
+                        // Add progress detail under the button row
+                        var detailRow = document.createElement('div');
+                        detailRow.style.cssText = 'padding:4px 12px 8px;font-size:12px;color:#aaa;display:flex;align-items:center;gap:8px;';
+                        detailRow.innerHTML = '<span class="subsync-spinner" style="display:inline-block;width:14px;height:14px;border:2px solid #555;border-top-color:#48c;border-radius:50%;animation:subsync-spin 0.8s linear infinite"></span>' +
+                            '<span class="subsync-phase">Preparing...</span>' +
+                            '<span class="subsync-time" style="margin-left:auto"></span>';
+                        row.parentNode.insertBefore(detailRow, row.nextSibling);
+
+                        // Inject spinner keyframes once
+                        if (!document.getElementById('subsync-spin-style')) {
+                            var style = document.createElement('style');
+                            style.id = 'subsync-spin-style';
+                            style.textContent = '@keyframes subsync-spin { to { transform: rotate(360deg) } }';
+                            document.head.appendChild(style);
+                        }
+
                         pollJobStatus(job.Id,
-                            function (progress) {
-                                btn.textContent = Math.round(progress * 100) + '%';
+                            function (progress, phase) {
+                                var pct = Math.round(progress * 100);
+                                btn.textContent = pct + '%';
+                                var phaseEl = detailRow.querySelector('.subsync-phase');
+                                if (phaseEl && phase) phaseEl.textContent = phase;
+                                // Update elapsed time
+                                var elapsed = Math.round((Date.now() - startTime) / 1000);
+                                var timeEl = detailRow.querySelector('.subsync-time');
+                                if (timeEl) timeEl.textContent = formatTime(elapsed);
                             },
                             function () {
                                 btn.textContent = 'Done!';
@@ -137,12 +168,21 @@
                                 row.style.background = '#243';
                                 label.textContent = label.textContent.replace(' \u2713 synced', '') + ' \u2713 synced';
                                 label.style.color = '#8f8';
+                                // Remove detail row
+                                if (detailRow.parentNode) detailRow.remove();
                             },
                             function (error) {
                                 btn.textContent = 'Failed';
                                 btn.style.background = '#a44';
                                 row.style.background = '#433';
-                                alert('Sync failed: ' + error);
+                                // Show error in detail row
+                                var spinnerEl = detailRow.querySelector('.subsync-spinner');
+                                if (spinnerEl) spinnerEl.style.display = 'none';
+                                var phaseEl = detailRow.querySelector('.subsync-phase');
+                                if (phaseEl) {
+                                    phaseEl.textContent = 'Error: ' + error;
+                                    phaseEl.style.color = '#f66';
+                                }
                             }
                         );
                     }).catch(function (err) {

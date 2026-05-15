@@ -66,6 +66,12 @@ public class SyncJob
     /// <summary>Gets or sets a progress value from 0.0 to 1.0.</summary>
     public double Progress { get; set; }
 
+    /// <summary>
+    /// Gets or sets the current phase label (e.g. "Extracting subtitle", "Syncing", "Replacing").
+    /// The frontend displays this to give the user context about what's happening.
+    /// </summary>
+    public string Phase { get; set; } = "Preparing";
+
     /// <summary>Gets or sets the error message if the job failed.</summary>
     public string? Error { get; set; }
 
@@ -407,6 +413,9 @@ public class SubSyncService
         try
         {
             // Step 0: Ensure ffsubsync is available
+            job.Phase = "Preparing";
+            job.Progress = 0.0;
+
             var ffsubsyncExe = ResolveFfSubSyncPath();
 
             if (!File.Exists(ffsubsyncExe) && ffsubsyncExe != "ffsubsync")
@@ -415,8 +424,6 @@ public class SubSyncService
             }
 
             // Step 1: Prepare subtitle input
-            //    - External: use the sidecar file directly (ffsubsync reads it read-only)
-            //    - Embedded: extract to temp dir first
             string subtitleInputPath;
 
             if (subtitleStream.IsExternal && !string.IsNullOrEmpty(subtitleStream.Path))
@@ -425,22 +432,32 @@ public class SubSyncService
             }
             else
             {
+                job.Phase = "Extracting subtitle";
+                job.Progress = 0.05;
                 subtitleInputPath = Path.Combine(tempDir, $"subtitle_{job.SubtitleIndex}.srt");
                 _logger.LogInformation("Extracting embedded subtitle stream {Index} from {Video}", job.SubtitleIndex, videoPath);
                 await ExtractSubtitle(videoPath, job.SubtitleIndex, subtitleInputPath).ConfigureAwait(false);
             }
 
-            job.Progress = 0.15;
+            // Step 2: Run ffsubsync → temp output
+            job.Phase = "Analyzing speech";
+            job.Progress = 0.1;
 
-            // Step 2: Run ffsubsync → temp output (NEVER write directly to the original)
             tempOutput = Path.Combine(tempDir, "synced.srt");
-            var args = BuildFfSubSyncArgs(config, videoPath, subtitleInputPath, tempOutput);
+            var args = BuildFfSubSyncArgs(config, videoPath, subtitleInputPath, tempOutput, tempDir);
 
             _logger.LogInformation("Running ffsubsync ({Exe}): {Args}", ffsubsyncExe, args);
 
-            var exitCode = await RunProcessAsync(ffsubsyncExe, args, tempDir, CancellationToken.None).ConfigureAwait(false);
-
-            job.Progress = 0.7;
+            // Parse ffsubsync stderr in real-time for progress updates.
+            // tqdm format: " 42%|████▎     | 3000.0/6997.696 [00:27<00:34, 115.36it/s]"
+            // Phase messages: "extracting speech...", "computing alignments...", "writing output..."
+            var exitCode = await RunProcessWithStderrCallbackAsync(
+                ffsubsyncExe, args, tempDir,
+                line =>
+                {
+                    ParseFfSubSyncStderr(line, job);
+                },
+                CancellationToken.None).ConfigureAwait(false);
 
             if (exitCode != 0)
             {
@@ -457,14 +474,9 @@ public class SubSyncService
             // Step 3: Atomically replace original subtitle with the synced version
             if (subtitleStream.IsExternal && !string.IsNullOrEmpty(subtitleStream.Path))
             {
-                //
-                // EXTERNAL SUBTITLE: safe replace of the sidecar file
-                //
-                //   original.srt  →  original.srt.bak.subsync   (backup)
-                //   synced.srt    →  original.srt               (atomic rename)
-                //
-                // If anything fails after the backup is created, rollback restores it.
-                //
+                job.Phase = "Replacing subtitle";
+                job.Progress = 0.85;
+
                 await ReplaceExternalSubtitle(subtitleStream.Path, tempOutput).ConfigureAwait(false);
                 backupPath = subtitleStream.Path + ".bak.subsync";
 
@@ -473,19 +485,9 @@ public class SubSyncService
             }
             else
             {
-                //
-                // EMBEDDED SUBTITLE: remux video with ffmpeg, replacing the subtitle stream
-                //
-                //   video.mkv         →  video.mkv.bak.subsync    (backup)
-                //   video_new.mkv     →  video.mkv                (atomic rename)
-                //
-                // The new video is identical to the original except the target subtitle
-                // stream is replaced with the synced SRT content.
-                //
-                // NOTE: remuxing is safe (no re-encoding) but requires the output container
-                //       to support SRT subtitles. MKV always does; MP4 does too.
-                //       If the input is e.g. .avi, this may fail — the error is propagated.
-                //
+                job.Phase = "Remuxing video";
+                job.Progress = 0.75;
+
                 (tempVideo, backupPath) = await ReplaceEmbeddedSubtitle(
                     videoPath, videoDir, videoNameNoExt, videoExt,
                     job.SubtitleIndex, tempOutput).ConfigureAwait(false);
@@ -494,7 +496,10 @@ public class SubSyncService
                 _logger.LogInformation("Replaced embedded subtitle in video: {Path} (backup at {Backup})", videoPath, backupPath);
             }
 
-            // Step 4: Verify the replacement is valid before declaring success
+            // Step 4: Verify
+            job.Phase = "Verifying";
+            job.Progress = 0.95;
+
             if (subtitleStream.IsExternal)
             {
                 if (!File.Exists(subtitleStream.Path) || new FileInfo(subtitleStream.Path).Length == 0)
@@ -510,10 +515,11 @@ public class SubSyncService
                 }
             }
 
-            // Step 5: Success — remove backup (everything went well)
+            // Step 5: Success — remove backup
             SafeDelete(backupPath);
             backupPath = null;
 
+            job.Phase = "Complete";
             job.Status = SyncJobStatus.Completed;
             job.Progress = 1.0;
 
@@ -699,7 +705,63 @@ public class SubSyncService
         try { if (File.Exists(path)) File.Delete(path); } catch { /* non-critical */ }
     }
 
-    private string BuildFfSubSyncArgs(Configuration.PluginConfiguration config, string videoPath, string subtitleInput, string subtitleOutput)
+    /// <summary>
+    /// Regex to extract tqdm percentage from ffsubsync stderr.
+    /// Matches patterns like " 42%|..." at the start of a line.
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex TqdmPercentRegex =
+        new(@"^\s*(\d+)%\|", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Parses a single stderr line from ffsubsync and updates job progress/phase.
+    /// ffsubsync outputs tqdm progress bars and phase log lines.
+    /// Progress mapping: speech extraction 10-55%, subtitle extraction 55-60%, alignment 60-75%.
+    /// </summary>
+    private void ParseFfSubSyncStderr(string line, SyncJob job)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        // Try to parse tqdm percentage
+        var match = TqdmPercentRegex.Match(line);
+        if (match.Success && int.TryParse(match.Groups[1].Value, out var percent))
+        {
+            // Speech extraction phase: map 0-100% → 0.10-0.55
+            job.Progress = 0.10 + (percent / 100.0) * 0.45;
+            job.Phase = "Analyzing speech";
+            return;
+        }
+
+        // Check for phase messages in log lines (lowercase to match stderr format)
+        var lower = line.ToLowerInvariant();
+
+        if (lower.Contains("extracting speech segments from subtitle"))
+        {
+            job.Phase = "Extracting subtitle speech";
+            job.Progress = 0.55;
+        }
+        else if (lower.Contains("computing alignments"))
+        {
+            job.Phase = "Computing alignment";
+            job.Progress = 0.60;
+        }
+        else if (lower.Contains("got score") && lower.Contains("for ratio"))
+        {
+            // Individual alignment iterations — nudge progress 0.60 → 0.75
+            // Each iteration is ~1s; we just slowly creep up
+            job.Phase = "Computing alignment";
+            job.Progress = Math.Min(job.Progress + 0.01, 0.74);
+        }
+        else if (lower.Contains("writing output"))
+        {
+            job.Phase = "Writing output";
+            job.Progress = 0.75;
+        }
+    }
+
+    private string BuildFfSubSyncArgs(Configuration.PluginConfiguration config, string videoPath, string subtitleInput, string subtitleOutput, string? logDir = null)
     {
         var args = new List<string>
         {
@@ -720,6 +782,11 @@ public class SubSyncService
         if (config.UseGoldenSectionSearch)
         {
             args.Add("--gss");
+        }
+
+        if (!string.IsNullOrWhiteSpace(logDir))
+        {
+            args.Add($"--log-dir-path {EscapeArg(logDir)}");
         }
 
         return string.Join(" ", args);
@@ -773,6 +840,57 @@ public class SubSyncService
         {
             _logger.LogDebug("Process {Exe} completed. stdout: {Stdout}", executable, stdout);
         }
+
+        return process.ExitCode;
+    }
+
+    /// <summary>
+    /// Runs a process and calls back with each stderr line in real-time.
+    /// Used for ffsubsync to parse tqdm progress and phase messages.
+    /// </summary>
+    private async Task<int> RunProcessWithStderrCallbackAsync(
+        string executable, string arguments, string? workingDir,
+        Action<string>? onStderrLine, CancellationToken cancellationToken)
+    {
+        using var process = new Process();
+        process.StartInfo = new ProcessStartInfo
+        {
+            FileName = executable,
+            Arguments = arguments,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        if (workingDir is not null)
+        {
+            process.StartInfo.WorkingDirectory = workingDir;
+        }
+
+        process.Start();
+
+        // Read stdout in background
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+
+        // Read stderr line-by-line in real-time
+        var stderrTask = Task.Run(async () =>
+        {
+            using var reader = process.StandardError;
+            while (!reader.EndOfStream)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+                if (line is not null && onStderrLine is not null)
+                {
+                    onStderrLine(line);
+                }
+            }
+        }, cancellationToken);
+
+        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+
+        await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
 
         return process.ExitCode;
     }
