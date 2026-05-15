@@ -29,10 +29,10 @@ Adds a **"Sync Subtitles"** option to the video detail page's **More** dropdown 
 
 ### From Release
 
-1. Download the plugin DLL from the [Releases](../../releases) page
+1. Download `Jellyfin.Plugin.SubSync.dll` and `meta.json` from the [latest release](../../releases)
 2. Create a directory at `/var/lib/jellyfin/plugins/SubSync_1.0.0.0/`
-3. Copy the DLL into that directory
-4. Restart Jellyfin
+3. Copy **both** files into that directory
+4. Restart Jellyfin (`sudo systemctl restart jellyfin`)
 
 ### From Source
 
