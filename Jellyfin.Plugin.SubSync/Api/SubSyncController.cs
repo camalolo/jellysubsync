@@ -144,6 +144,7 @@ public class SubSyncController : ControllerBase
     /// <returns>The JavaScript content.</returns>
     [HttpGet("ClientScript")]
     [Produces("application/javascript")]
+    [AllowAnonymous]
     public IActionResult GetClientScript()
     {
         var js = GetEmbeddedResource("Jellyfin.Plugin.SubSync.Web.subsync.js");
