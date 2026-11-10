@@ -87,4 +87,13 @@ The client JS (`subsync.js`) is an ES5 IIFE that:
 - Injects a "Sync Subtitles" menu item with `data-id="subsync"`
 - Shows a modal dialog for subtitle selection and sync progress
 - Polls `GET /SubSync/Jobs/{jobId}` every 2000ms for progress updates
-- Authenticates all requests via `X-Emby-Token` header from `ApiClient.accessToken()`
+- Authenticates all requests with BOTH `X-Emby-Token` and `Authorization: MediaBrowser Token="<token>"` headers from `ApiClient.accessToken()`
+  - Jellyfin 12.x dropped `X-Emby-Token` and `api_key` query param auth (both return 401); only the standard `Authorization: MediaBrowser Token` scheme is accepted
+  - `X-Emby-Token` kept for older 10.x servers; sending both is safe on either version
+  - Same dual-header fix applied to `configPage.html` `apiFetch()`
+
+### Jellyfin 12.x upgrade notes (2026-11-10)
+
+- Server 12.4.0 web UI is React-based but still renders the legacy `btnMoreCommands` button and `.actionSheetContent` action sheet (lives in lazy chunks, e.g. `itemDetails-index-html.*.chunk.js`), so the DOM hooks still work
+- `ApiClient.accessToken()` remains a function on the legacy global `ApiClient` in 12.4.0 — token retrieval unchanged
+- `SubSyncController.GetClientScript()` now sends `Cache-Control: no-cache` so client script updates reach browsers without a hard refresh

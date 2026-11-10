@@ -153,6 +153,8 @@ public class SubSyncController : ControllerBase
             return NotFound();
         }
 
+        // Always revalidate so client script updates reach browsers without a hard refresh
+        Response.Headers.CacheControl = "no-cache";
         return Content(js, "application/javascript");
     }
 

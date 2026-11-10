@@ -63,9 +63,12 @@ public class SubSyncMiddleware
 
         await _next(context).ConfigureAwait(false);
 
-        // Only modify HTML responses
+        // Only modify successful HTML responses. Never touch responses without a body —
+        // writing to a 304 Not Modified response throws InvalidOperationException in Kestrel.
+        var statusCode = context.Response.StatusCode;
         var contentType = context.Response.ContentType ?? string.Empty;
-        if (!contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase))
+        if (statusCode != StatusCodes.Status200OK
+            || !contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase))
         {
             responseBody.Position = 0;
             await responseBody.CopyToAsync(originalBodyStream).ConfigureAwait(false);

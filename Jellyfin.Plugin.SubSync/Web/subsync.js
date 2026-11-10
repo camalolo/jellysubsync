@@ -19,6 +19,21 @@
         return '';
     }
 
+    /**
+     * Build auth headers for plugin API calls.
+     * Jellyfin 12+ only accepts the standard "Authorization: MediaBrowser Token" scheme;
+     * X-Emby-Token is kept for compatibility with older 10.x servers.
+     */
+    function authHeaders() {
+        var headers = {};
+        var token = getAccessToken();
+        if (token) {
+            headers['X-Emby-Token'] = token;
+            headers['Authorization'] = 'MediaBrowser Token="' + token + '"';
+        }
+        return headers;
+    }
+
     function getItemIdFromHash() {
         var hash = location.hash || '';
         var match = hash.match(/[?&]id=([0-9a-fA-F-]+)/);
@@ -27,7 +42,7 @@
 
     function fetchSubtitles(itemId) {
         return fetch(SYNC_BASE + '/Subtitles/' + itemId, {
-            headers: { 'X-Emby-Token': getAccessToken() }
+            headers: authHeaders()
         }).then(function (r) {
             if (!r.ok) throw new Error('Failed to fetch subtitles: ' + r.status);
             return r.json();
@@ -35,12 +50,11 @@
     }
 
     function startSync(itemId, subtitleIndex) {
+        var headers = authHeaders();
+        headers['Content-Type'] = 'application/json';
         return fetch(SYNC_BASE + '/Sync', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Emby-Token': getAccessToken()
-            },
+            headers: headers,
             body: JSON.stringify({ ItemId: itemId, SubtitleIndex: subtitleIndex })
         }).then(function (r) {
             if (!r.ok) throw new Error('Sync request failed: ' + r.status);
@@ -51,7 +65,7 @@
     function pollJobStatus(jobId, onProgress, onComplete, onError) {
         var pollInterval = setInterval(function () {
             fetch(SYNC_BASE + '/Jobs/' + jobId, {
-                headers: { 'X-Emby-Token': getAccessToken() }
+                headers: authHeaders()
             }).then(function (r) { return r.json(); }).then(function (job) {
                 if (job.Status === 'Completed') {
                     clearInterval(pollInterval);

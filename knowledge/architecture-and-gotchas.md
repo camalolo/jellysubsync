@@ -33,13 +33,9 @@ The GUID `c7d8e9f0-a1b2-4c3d-e5f6-a7b8c9d0e1f2` must stay consistent across:
 
 ## Script Injection into index.html
 
-Source: `Plugin.cs:81-120`
+**Replaced by HTTP middleware** (`SubSyncMiddleware.cs`, commit 6124f09): the middleware intercepts requests to `/`, `/index.html`, `/web/`, `/web/index.html`, forces `Accept-Encoding: identity`, buffers the response, and injects the script block before `</body>` when the response is 200 + `text/html` and not already injected.
 
-- On startup, `InjectScript()` reads Jellyfin's `{WebPath}/index.html`
-- Injects a `<script src="/SubSync/ClientScript">` block before `</body>`
-- Idempotent: checks for sentinel `<!-- SubSync Client Script -->` before injecting
-- On uninstall, `OnUninstalling()` removes the injection block via regex
-- If index.html doesn't exist or lacks `</body>`, logs a warning and skips
+- ⚠️ **Gotcha**: never write to the response body for non-200 responses — writing to a `304 Not Modified` response throws `InvalidOperationException` in Kestrel ("Writing to the response body is invalid for responses with status code 304"). The middleware passes 304s through untouched (fixed 2026-11-10).
 
 ## Sync Job Execution Pipeline
 
